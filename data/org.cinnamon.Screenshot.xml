@@ -1,0 +1,20 @@
+<!DOCTYPE node PUBLIC
+'-//freedesktop//DTD D-BUS Object Introspection 1.0//EN'
+'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>
+<node>
+
+  <!--
+      org.cinnamon.Screenshot:
+      @short_description: Cinnamon's color-picker interface
+
+      The portal spawns the cinnamon-screenshot CLI for image captures, so
+      only PickColor is consumed via DBus here.
+  -->
+  <interface name="org.cinnamon.Screenshot">
+
+    <method name="PickColor">
+      <arg type="a{sv}" direction="out" name="result"/>
+    </method>
+
+  </interface>
+</node>

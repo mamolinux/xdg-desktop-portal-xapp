@@ -20,7 +20,7 @@
 #include "request.h"
 #include "utils.h"
 
-static OrgGnomeShellScreenshot *cinnamon;
+static OrgCinnamonScreenshot *cinnamon;
 
 typedef struct {
     XdpImplScreenshot *impl;
@@ -127,7 +127,7 @@ cinnamon_color_pick_done (GObject *source,
 
     error = NULL;
 
-    if (!org_gnome_shell_screenshot_call_pick_color_finish (cinnamon,
+    if (!org_cinnamon_screenshot_call_pick_color_finish (cinnamon,
                                                          &ret,
                                                          result,
                                                          &error))
@@ -157,29 +157,34 @@ cinnamon_color_pick_done (GObject *source,
 }
 
 static void
-cinnamon_screenshot_done (GObject *source,
-                          GAsyncResult *result,
-                          gpointer data)
+cinnamon_screenshot_finished (GSubprocess  *proc,
+                              GAsyncResult *res,
+                              gpointer      user_data)
 {
-    ScreenshotHandle *handle = data;
-    gboolean success;
-    g_autofree char *filename = NULL;
-    g_autoptr(GError) error = NULL;
+    ScreenshotHandle *handle = user_data;
+    GError *error = NULL;
 
-    if (!org_gnome_shell_screenshot_call_screenshot_finish (cinnamon,
-                                                         &success,
-                                                         &filename,
-                                                         result,
-                                                         &error))
+    if (!g_subprocess_wait_finish (proc, res, &error))
     {
-        g_warning ("Failed to get screenshot: %s", error->message);
+        if (error != NULL)
+        {
+            g_warning ("Something went wrong with cinnamon-screenshot: (%d) %s", error->code, error->message);
+            g_clear_error (&error);
+        }
         handle->response = 2;
-        send_response (handle);
-        return;
     }
-
-    handle->uri = g_filename_to_uri (filename, NULL, NULL);
-    handle->response = 0;
+    else if (!g_subprocess_get_successful (proc))
+    {
+        // cinnamon-screenshot exits non-zero when the user cancels the
+        // interactive UI without saving — that's a request cancel rather
+        // than an error, so report response = 1.
+        g_debug ("cinnamon-screenshot exited non-zero (likely user cancel)");
+        handle->response = 1;
+    }
+    else
+    {
+        handle->response = 0;
+    }
 
     send_response (handle);
 }
@@ -253,7 +258,7 @@ handle_pick_color (XdpImplScreenshot *object,
 
     g_signal_connect (request, "handle-close", G_CALLBACK (handle_close), handle);
     request_export (request, g_dbus_method_invocation_get_connection (invocation));
-    org_gnome_shell_screenshot_call_pick_color (cinnamon,
+    org_cinnamon_screenshot_call_pick_color (cinnamon,
                                              NULL,
                                              cinnamon_color_pick_done,
                                              handle);
@@ -332,14 +337,59 @@ handle_screenshot (XdpImplScreenshot *object,
     else
     if (CINNAMON_MODE)
     {
-        g_debug ("Calling Cinnamon to handle screenshot");
-        org_gnome_shell_screenshot_call_screenshot (cinnamon,
-                                                 FALSE,
-                                                 TRUE,
-                                                 handle->save_path,
-                                                 NULL,
-                                                 cinnamon_screenshot_done,
-                                                 handle);
+        if (g_find_program_in_path ("cinnamon-screenshot"))
+        {
+            GSubprocess *proc;
+            GError *error = NULL;
+            gboolean interactive = FALSE;
+            guint32 target = 0;
+            const char *target_flag = NULL;
+
+            g_variant_lookup (arg_options, "interactive", "b", &interactive);
+            g_variant_lookup (arg_options, "target", "u", &target);
+
+            // Portal target values: 1=Screen, 2=Window, 4=Area, 8=Active Window.
+            // Cinnamon treats Window and Active Window the same.
+            if (target == 2 || target == 8)
+                target_flag = "--window";
+            else if (target == 4)
+                target_flag = "--area";
+
+            g_debug ("Spawning cinnamon-screenshot (interactive=%d, target=%u)",
+                     interactive, target);
+
+            GPtrArray *args = g_ptr_array_new ();
+            g_ptr_array_add (args, (gpointer) "cinnamon-screenshot");
+            g_ptr_array_add (args, (gpointer) "-f");
+            g_ptr_array_add (args, handle->save_path);
+            if (interactive)
+                g_ptr_array_add (args, (gpointer) "-i");
+            if (target_flag != NULL)
+                g_ptr_array_add (args, (gpointer) target_flag);
+            g_ptr_array_add (args, NULL);
+
+            proc = g_subprocess_newv ((const gchar * const *) args->pdata,
+                                      G_SUBPROCESS_FLAGS_NONE, &error);
+            g_ptr_array_free (args, TRUE);
+
+            if (error)
+            {
+                g_warning ("Could not take screenshot, call to cinnamon-screenshot failed: %s", error->message);
+                g_clear_error (&error);
+                handle->response = 2;
+                send_response (handle);
+            }
+            else
+            {
+                g_subprocess_wait_async (proc, NULL, (GAsyncReadyCallback) cinnamon_screenshot_finished, handle);
+            }
+        }
+        else
+        {
+            g_warning ("Screenshot requested but cinnamon-screenshot is not installed");
+            handle->response = 2;
+            send_response (handle);
+        }
     }
     else
     {
@@ -359,7 +409,13 @@ screenshot_init (GDBusConnection *bus,
 
     helper = G_DBUS_INTERFACE_SKELETON (xdp_impl_screenshot_skeleton_new ());
 
-    g_object_set (helper, "version", 2, NULL);
+    // Targets cinnamon-screenshot can satisfy: Screen | Window | Area |
+    // Active Window. Window and Active Window collapse to the same --window
+    // mode, but advertise both so callers can ask for either.
+    g_object_set (helper,
+                  "version", 3,
+                  "available-targets", (guint32) (1 | 2 | 4 | 8),
+                  NULL);
 
     // TODO: Need to implement dialog (or maybe interact with screenshot app).
     g_signal_connect (helper, "handle-screenshot", G_CALLBACK (handle_screenshot), NULL);
@@ -371,10 +427,10 @@ screenshot_init (GDBusConnection *bus,
                                            error))
         return FALSE;
 
-    cinnamon = org_gnome_shell_screenshot_proxy_new_sync (bus,
+    cinnamon = org_cinnamon_screenshot_proxy_new_sync (bus,
                                                        G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
-                                                       "org.Cinnamon",
-                                                       "/org/gnome/Shell/Screenshot",
+                                                       "org.cinnamon.Screenshot",
+                                                       "/org/cinnamon/Screenshot",
                                                        NULL,
                                                        error);
     if (cinnamon == NULL)
