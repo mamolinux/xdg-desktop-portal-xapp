@@ -349,8 +349,9 @@ handle_screenshot (XdpImplScreenshot *object,
             g_variant_lookup (arg_options, "target", "u", &target);
 
             // Portal target values: 1=Screen, 2=Window, 4=Area, 8=Active Window.
-            // Cinnamon treats Window and Active Window the same.
-            if (target == 2 || target == 8)
+            if (target == 2)
+                target_flag = "--select-window";
+            else if (target == 8)
                 target_flag = "--window";
             else if (target == 4)
                 target_flag = "--area";
@@ -410,14 +411,13 @@ screenshot_init (GDBusConnection *bus,
     helper = G_DBUS_INTERFACE_SKELETON (xdp_impl_screenshot_skeleton_new ());
 
     // Targets cinnamon-screenshot can satisfy: Screen | Window | Area |
-    // Active Window. Window and Active Window collapse to the same --window
-    // mode, but advertise both so callers can ask for either.
+    // Active Window. Window (2) runs the interactive picker; Active Window
+    // (8) captures the currently-focused window without prompting.
     g_object_set (helper,
                   "version", 3,
                   "available-targets", (guint32) (1 | 2 | 4 | 8),
                   NULL);
 
-    // TODO: Need to implement dialog (or maybe interact with screenshot app).
     g_signal_connect (helper, "handle-screenshot", G_CALLBACK (handle_screenshot), NULL);
     g_signal_connect (helper, "handle-pick-color", G_CALLBACK (handle_pick_color), NULL);
 
