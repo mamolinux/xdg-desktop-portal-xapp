@@ -258,6 +258,18 @@ handle_pick_color (XdpImplScreenshot *object,
 
     g_signal_connect (request, "handle-close", G_CALLBACK (handle_close), handle);
     request_export (request, g_dbus_method_invocation_get_connection (invocation));
+
+    // Only cinnamon provides a color picker. xfce4-screenshooter has no
+    // equivalent, so report failure rather than try to invoke a backend
+    // that doesn't exist.
+    if (!CINNAMON_MODE || cinnamon == NULL)
+    {
+        g_warning ("PickColor requested but no backend is available in this mode");
+        handle->response = 2;
+        send_response (handle);
+        return TRUE;
+    }
+
     org_cinnamon_screenshot_call_pick_color (cinnamon,
                                              NULL,
                                              cinnamon_color_pick_done,
@@ -303,12 +315,32 @@ handle_screenshot (XdpImplScreenshot *object,
         {
             GSubprocess *proc;
             GError *error = NULL;
+            guint32 target = 0;
+            const char *target_flag = NULL;
 
-            g_debug ("Using xfce4-screenshooter to handle screenshot");
+            g_variant_lookup (arg_options, "target", "u", &target);
+
+            // xfce4-screenshooter targets: Screen via -f, Area via -r,
+            // Active Window via -w. It has no interactive window picker,
+            // so target=2 is not advertised; defensive fallback to -w if
+            // a client asks anyway. We must always pass a target flag
+            // because xfce4-screenshooter ignores --save unless one of
+            // -f/-w/-r is given, so the "interactive" portal option (no
+            // target specified) can't be honored here — default to
+            // fullscreen.
+            if (target == 4)
+                target_flag = "-r";
+            else if (target == 8 || target == 2)
+                target_flag = "-w";
+            else
+                target_flag = "-f";
+
+            g_debug ("Spawning xfce4-screenshooter (target=%u, flag=%s)",
+                     target, target_flag);
 
             const gchar *argv[] = {
                 "xfce4-screenshooter",
-                "-f",
+                target_flag,
                 "--save", handle->save_path,
                 NULL
             };
@@ -407,15 +439,22 @@ screenshot_init (GDBusConnection *bus,
                  GError **error)
 {
     GDBusInterfaceSkeleton *helper;
+    guint32 available_targets;
 
     helper = G_DBUS_INTERFACE_SKELETON (xdp_impl_screenshot_skeleton_new ());
 
-    // Targets cinnamon-screenshot can satisfy: Screen | Window | Area |
-    // Active Window. Window (2) runs the interactive picker; Active Window
-    // (8) captures the currently-focused window without prompting.
+    // Portal target bits: 1=Screen, 2=Window, 4=Area, 8=Active Window.
+    // cinnamon-screenshot supports all four (target=2 runs the picker);
+    // xfce4-screenshooter has no interactive window picker, so it omits
+    // target=2.
+    if (CINNAMON_MODE)
+        available_targets = 1 | 2 | 4 | 8;
+    else
+        available_targets = 1 | 4 | 8;
+
     g_object_set (helper,
                   "version", 3,
-                  "available-targets", (guint32) (1 | 2 | 4 | 8),
+                  "available-targets", available_targets,
                   NULL);
 
     g_signal_connect (helper, "handle-screenshot", G_CALLBACK (handle_screenshot), NULL);
@@ -427,14 +466,19 @@ screenshot_init (GDBusConnection *bus,
                                            error))
         return FALSE;
 
-    cinnamon = org_cinnamon_screenshot_proxy_new_sync (bus,
-                                                       G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
-                                                       "org.cinnamon.Screenshot",
-                                                       "/org/cinnamon/Screenshot",
-                                                       NULL,
-                                                       error);
-    if (cinnamon == NULL)
-        return FALSE;
+    // The cinnamon proxy is only used for PickColor — xfce4-screenshooter
+    // has no equivalent, so skip creating it outside cinnamon mode.
+    if (CINNAMON_MODE)
+    {
+        cinnamon = org_cinnamon_screenshot_proxy_new_sync (bus,
+                                                           G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+                                                           "org.cinnamon.Screenshot",
+                                                           "/org/cinnamon/Screenshot",
+                                                           NULL,
+                                                           error);
+        if (cinnamon == NULL)
+            return FALSE;
+    }
 
     g_debug ("providing %s", g_dbus_interface_skeleton_get_info (helper)->name);
 
