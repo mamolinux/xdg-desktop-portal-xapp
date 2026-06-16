@@ -1,3 +1,15 @@
+xdg-desktop-portal-xapp (1.1.4) alfa; urgency=medium
+
+  [ Michael Webster ]
+  * .github/workflows: Add generate-test-packages trigger.
+  * screenshot.c: Fix failure handling for xfce sessions, use correct return codes.
+  * wallpaper.c: Fix wrong return code.
+  * screenshot: Adapt to cinnamon-screensaver, update interface version.
+  * screenshot.c: Add support for Cinnamon's window-selection.
+  * screenshot.c: Support the 'target' option with xfce4-screenshooter.
+
+ -- Clement Lefebvre <root@linuxmint.com>  Tue, 16 Jun 2026 17:46:55 +0200
+
 xdg-desktop-portal-xapp (1.1.3) zena; urgency=medium
 
   [ Michael Webster ]
